@@ -2,6 +2,7 @@ import click
 import numpy as np
 import openpyxl
 from pathlib import Path
+from datetime import datetime
 
 @click.command()
 @click.option('--cells', type=click.Path(exists=True, file_okay=False, dir_okay=True), required=True, help='Directory containing the cell segmentation files.')
@@ -17,7 +18,7 @@ def analyze_cells(cells, exclude, pixel_size):
     exclude_dir = Path(exclude)
     pixel_area = pixel_size ** 2
 
-    results = {}
+    results = []
 
     for cell_file in sorted(cells_dir.rglob('*_seg.npy')):
         # Ignore hidden files (like ._... on macOS)
@@ -55,11 +56,6 @@ def analyze_cells(cells, exclude, pixel_size):
             click.secho(f"Error processing {cell_file} or {exclude_file}: {e}", fg='red')
             continue
 
-        # Get the top-level folder pair name for aggregation
-        folder_pair_name = relative_path.parts[0]
-        if folder_pair_name not in results:
-            results[folder_pair_name] = {'Total Cells': 0, 'Total Area': 0}
-
         # Find unique cell IDs (excluding 0, which is the background)
         unique_cells = np.unique(cell_mask[cell_mask > 0])
         valid_cell_count = 0
@@ -79,38 +75,55 @@ def analyze_cells(cells, exclude, pixel_size):
         non_excluded_area_pixels = np.sum(exclude_mask == 0)
         non_excluded_area_um2 = non_excluded_area_pixels * pixel_area
 
-        results[folder_pair_name]['Total Cells'] += valid_cell_count
-        results[folder_pair_name]['Total Area'] += non_excluded_area_um2
+        # Calculate cell density for this file
+        if non_excluded_area_um2 > 0:
+            density = valid_cell_count / non_excluded_area_um2
+        else:
+            density = 0
 
-    # After processing all files, save the aggregated results
+        # Get the parent folder name (folder containing the image files)
+        parent_folder = relative_path.parent.name if relative_path.parent != Path('.') else ''
+
+        # Store results for this individual file
+        results.append({
+            'file_path': str(relative_path),
+            'parent_folder': parent_folder,
+            'total_cells': valid_cell_count,
+            'total_area': non_excluded_area_um2,
+            'cell_density': density
+        })
+
+    # After processing all files, save the results
     if results:
-        save_results_to_excel(results)
+        # Construct output filename from input paths and timestamp
+        cells_path_str = str(cells_dir).replace('/', '_').replace(' ', '_')
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H_%M_%S')
+        output_filename = f"{cells_path_str}_{timestamp}.xlsx"
+        save_results_to_excel(results, output_filename)
     else:
         click.secho("No data processed. No output file generated.", fg='yellow')
 
     click.echo("\nAnalysis complete.")
 
 def save_results_to_excel(results, output_filename="cell_count_results.xlsx"):
-    """Saves the aggregated results to an Excel file."""
+    """Saves the per-file results to an Excel file."""
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = "Cell Count Analysis"
 
     # Write header
-    header = ["Folder Pair", "Total Cells", "Total Area (µm²)", "Cell Density (cells/µm²)"]
+    header = ["Parent Folder", "File Path", "Total Cells", "Total Area (µm²)", "Cell Density (cells/µm²)"]
     sheet.append(header)
 
-    # Write data rows
-    for folder_pair, data in results.items():
-        total_cells = data['Total Cells']
-        total_area = data['Total Area']
+    # Write data rows for each file
+    for file_result in results:
+        parent_folder = file_result['parent_folder']
+        file_path = file_result['file_path']
+        total_cells = file_result['total_cells']
+        total_area = file_result['total_area']
+        density = file_result['cell_density']
 
-        if total_area > 0:
-            density = total_cells / total_area
-        else:
-            density = 0
-
-        row = [folder_pair, total_cells, f"{total_area:.2f}", f"{density:.4f}"]
+        row = [parent_folder, file_path, total_cells, f"{total_area:.2f}", f"{density:.6f}"]
         sheet.append(row)
 
     try:
